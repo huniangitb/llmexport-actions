@@ -1,0 +1,140 @@
+name: Model Conversion Workflow
+
+on:
+  workflow_dispatch:
+    inputs:
+      model_url:
+        description: '模型下载URL (支持HuggingFace/GitHub URL)'
+        required: true
+      export_format:
+        description: '导出格式 (例如: mnn)'
+        required: true
+        default: 'mnn'
+      quant_bit:
+        description: '量化位数'
+        required: true
+        default: '4'
+      quant_block:
+        description: '量化块大小'
+        required: true
+        default: '128'
+
+jobs:
+  convert_model:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+
+    - name: Extract model name
+      id: extract_name
+      run: |
+        URL="${{ inputs.model_url }}"
+        # 处理 GitHub URL
+        if [[ $URL == *"github.com"* ]]; then
+          MODEL_NAME=$(basename "$URL" | sed 's/\.git$//')
+        # 处理 Hugging Face URL
+        elif [[ $URL == *"huggingface.co"* ]]; then
+          MODEL_NAME=$(echo "$URL" | awk -F'/' '{print $(NF)}')
+        # 处理直接的 zip 文件下载链接
+        elif [[ $URL == *".zip"* ]]; then
+          MODEL_NAME=$(basename "$URL" .zip)
+        else
+          MODEL_NAME=$(basename "$URL")
+        fi
+        echo "MODEL_NAME=${MODEL_NAME}" >> $GITHUB_ENV
+        echo "model_name=${MODEL_NAME}" >> $GITHUB_OUTPUT
+        echo "提取的模型名称: ${MODEL_NAME}"
+
+    - name: Create swap space
+      run: |
+        sudo fallocate -l 8G /swapfile
+        sudo chmod 600 /swapfile
+        sudo mkswap /swapfile
+        sudo swapon /swapfile
+        free -h
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install torch transformers accelerate
+        pip install llmexport
+        pip install tqdm
+        pip install mnn
+        pip install git+https://github.com/huggingface/huggingface_hub
+
+    - name: Download model
+      run: |
+        mkdir -p ${{ github.workspace }}/models
+        cd ${{ github.workspace }}/models
+        
+        URL="${{ inputs.model_url }}"
+        if [[ $URL == *"huggingface.co"* ]]; then
+          python -c "
+        from huggingface_hub import snapshot_download
+        snapshot_download(repo_id='${{ env.MODEL_NAME }}', local_dir='${{ env.MODEL_NAME }}')
+          "
+        elif [[ $URL == *".zip"* ]]; then
+          wget $URL -O model.zip
+          unzip model.zip -d ${{ env.MODEL_NAME }}
+        elif [[ $URL == *"github.com"* ]]; then
+          git clone $URL ${{ env.MODEL_NAME }}
+        else
+          echo "不支持的URL格式"
+          exit 1
+        fi
+
+    - name: Convert model
+      run: |
+        cd ${{ github.workspace }}/models
+        echo "开始转换模型: ${{ env.MODEL_NAME }}"
+        llmexport --path ${{ env.MODEL_NAME }} \
+                 --export ${{ inputs.export_format }} \
+                 --quant_bit ${{ inputs.quant_bit }} \
+                 --quant_block ${{ inputs.quant_block }}
+
+    - name: Prepare artifacts
+      run: |
+        cd ${{ github.workspace }}/models
+        # 创建一个目录来存放转换后的文件
+        mkdir -p converted_model
+        # 移动所有转换后的文件（根据实际输出格式调整）
+        if [ -d "${{ env.MODEL_NAME }}" ]; then
+          cp -r ${{ env.MODEL_NAME }}/* converted_model/
+        fi
+
+    - name: Upload converted model
+      uses: actions/upload-artifact@v3
+      with:
+        name: ${{ env.MODEL_NAME }}-converted
+        path: ${{ github.workspace }}/models/converted_model
+        retention-days: 5
+
+    - name: Create Release
+      id: create_release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: ${{ github.workspace }}/models/converted_model/*
+        tag_name: ${{ env.MODEL_NAME }}-${{ github.sha }}
+        name: ${{ env.MODEL_NAME }} Converted Model
+        body: |
+          Model: ${{ env.MODEL_NAME }}
+          Format: ${{ inputs.export_format }}
+          Quantization: ${{ inputs.quant_bit }}bit
+          Block Size: ${{ inputs.quant_block }}
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Cleanup
+      if: always()
+      run: |
+        sudo swapoff /swapfile
+        sudo rm /swapfile
