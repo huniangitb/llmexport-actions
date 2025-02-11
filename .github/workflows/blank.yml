@@ -176,6 +176,9 @@ jobs:
         
         cd package_temp
         
+        # Ensure the output directory exists
+        mkdir -p ../
+
         zip -r ../${{ env.MODEL_NAME }}.zip ./*
         
         if [ ! -f ../${{ env.MODEL_NAME }}.zip ]; then
