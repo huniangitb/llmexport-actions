@@ -184,12 +184,15 @@ jobs:
         fi
         
         cd ..
+        pwd 
+        ls
         rm -rf package_temp
-
-    - name: List files in archive
-      id: list_files
-      run: |
-        unzip -l ${{ env.MODEL_NAME }}.zip > file_list.txt
+        - name: List files in archive
+        id: list_files
+        run: |
+        cd ${{ github.workspace }}/models/converted
+        ls
+        unzip -l ${{ env.MODEL_NAME }}.zip > file_list.txt || { echo "Error: Failed to list files in archive"; exit 1; }
         cat file_list.txt
 
     - name: Upload artifact
