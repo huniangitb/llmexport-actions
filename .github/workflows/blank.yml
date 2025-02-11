@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       model_url:
-        description: '模型下载URL (支持 HuggingFace/GitHub URL)'
+        description: '模型下载URL (支持任意Git仓库/HuggingFace/压缩包URL)'
         required: true
       export_format:
         description: '导出格式 (例如: mnn)'
@@ -28,34 +28,97 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.10'
+    # 提前安装基础工具
+    - name: Setup system tools
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y wget unzip git
 
+    # 提取模型信息移到前面
     - name: Extract model info
       id: model_info
       env:
         MODEL_URL: ${{ github.event.inputs.model_url }}
       run: |
         set -eo pipefail
+        
+        # 检查URL是否有效
+        if [[ -z "$MODEL_URL" ]]; then
+          echo "Error: Empty model URL"
+          exit 1
+        fi
+        
+        # 提取模型名称
         if [[ $MODEL_URL == *"huggingface.co"* ]]; then
-          # 提取完整的 repo_id (e.g. username/model_name)
           MODEL_NAME=$(echo "$MODEL_URL" | sed -n 's|.*huggingface\.co/\([^/]\{1,\}/[^/]\{1,\}\).*|\1|p')
           [ -z "$MODEL_NAME" ] && MODEL_NAME=$(echo "$MODEL_URL" | awk -F/ '{print $(NF-1)"/"$NF}')
-        elif [[ $MODEL_URL == *"github.com"* ]]; then
-          MODEL_NAME=$(basename "$MODEL_URL" .git)
+          echo "Source type: HuggingFace"
+        elif [[ $MODEL_URL == *.git ]] || [[ $MODEL_URL == *"/tree/"* ]] || [[ $MODEL_URL == *"/blob/"* ]]; then
+          # 处理各种 git 仓库 URL 格式
+          MODEL_NAME=$(echo "$MODEL_URL" | awk -F/ '{print $(NF-1)"/"$NF}' | sed 's/\.git$//')
+          echo "Source type: Git Repository"
+        elif [[ $MODEL_URL == *.zip ]] || [[ $MODEL_URL == *.tar.gz ]] || [[ $MODEL_URL == *.tgz ]]; then
+          MODEL_NAME=$(basename "$MODEL_URL" | sed 's/\.[^.]*$//')
+          echo "Source type: Archive"
         else
-          MODEL_NAME=$(basename "$MODEL_URL" | sed 's/\.zip$//;s/\.tar$//')
+          echo "Warning: Unrecognized URL format, attempting to treat as git repository"
+          MODEL_NAME=$(basename "$MODEL_URL" | sed 's/\.git$//')
+          echo "Source type: Unknown (treating as git)"
         fi
+        
+        echo "Extracted model name: ${MODEL_NAME}"
         echo "MODEL_NAME=${MODEL_NAME}" >> $GITHUB_ENV
         echo "REPO_ID=${MODEL_NAME}" >> $GITHUB_ENV
         echo "model_name=${MODEL_NAME}" >> $GITHUB_OUTPUT
 
-    - name: Setup system tools
+    # 下载模型移到 Python 设置之前
+    - name: Download model
+      env:
+        HF_TOKEN: ${{ secrets.HUGGINGFACE_TOKEN }}
       run: |
-        sudo apt-get update
-        sudo apt-get install -y wget unzip git
+        set -x
+        mkdir -p ${{ github.workspace }}/models
+        cd ${{ github.workspace }}/models
+        
+        download_status=0
+        
+        # 尝试下载模型
+        if [[ $MODEL_URL == *"huggingface.co"* ]]; then
+          echo "Downloading from HuggingFace..."
+          huggingface-cli download ${{ env.REPO_ID }} \
+            --cache-dir . \
+            --token $HF_TOKEN \
+            --resume-download \
+            --local-dir ${{ env.MODEL_NAME }} || download_status=$?
+        elif [[ $MODEL_URL == *.zip ]]; then
+          echo "Downloading zip archive..."
+          wget -q ${{ github.event.inputs.model_url }} -O model.zip && \
+          unzip -q model.zip -d ${{ env.MODEL_NAME }} || download_status=$?
+        elif [[ $MODEL_URL == *.tar.gz ]] || [[ $MODEL_URL == *.tgz ]]; then
+          echo "Downloading tar archive..."
+          wget -q ${{ github.event.inputs.model_url }} -O model.tar.gz && \
+          tar xzf model.tar.gz -C ${{ env.MODEL_NAME }} || download_status=$?
+        else
+          echo "Attempting to clone repository..."
+          git clone --depth 1 ${{ github.event.inputs.model_url }} ${{ env.MODEL_NAME }} || download_status=$?
+        fi
+        
+        # 检查下载结果
+        if [ $download_status -ne 0 ]; then
+          echo "Error: Failed to download model"
+          exit 1
+        fi
+        
+        # 验证下载的文件
+        if [ ! -d "${{ env.MODEL_NAME }}" ]; then
+          echo "Error: Model directory not found after download"
+          exit 1
+        fi
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
 
     - name: Configure swap space
       run: |
@@ -71,46 +134,32 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install torch transformers accelerate llmexport tqdm
-        pip install "mnn>=2.0.0"  # 确认 MNN 版本
+        pip install "mnn>=2.0.0"
         pip install huggingface_hub
-
-    - name: Download model
-      env:
-        HF_TOKEN: ${{ secrets.HUGGINGFACE_TOKEN }}
-      run: |
-        set -x
-        mkdir -p ${{ github.workspace }}/models
-        cd ${{ github.workspace }}/models
-
-        if [[ "${{ env.MODEL_NAME }}" == */* ]] && [[ $MODEL_URL == *"huggingface.co"* ]]; then
-          echo "Downloading Hugging Face model..."
-          huggingface-cli download ${{ env.REPO_ID }} \
-            --cache-dir . \
-            --token $HF_TOKEN \
-            --resume-download \
-            --local-dir ${{ env.MODEL_NAME }}
-        elif [[ $MODEL_URL == *".zip" ]]; then
-          echo "Downloading zip archive..."
-          wget -q ${{ github.event.inputs.model_url }} -O model.zip
-          unzip -q model.zip -d ${{ env.MODEL_NAME }}
-        elif [[ $MODEL_URL == *"github.com"* ]]; then
-          echo "Cloning Git repository..."
-          git clone --depth 1 ${{ github.event.inputs.model_url }} ${{ env.MODEL_NAME }}
-        else
-          echo "Unsupported URL format"
-          exit 1
-        fi
 
     - name: Convert model
       run: |
         set -x
         cd ${{ github.workspace }}/models
+        
+        # 检查模型文件夹是否存在必要的文件
+        if [ ! -d "${{ env.MODEL_NAME }}" ]; then
+          echo "Error: Model directory not found"
+          exit 1
+        fi
+        
         llmexport --path ${{ env.MODEL_NAME }} \
                  --export ${{ github.event.inputs.export_format }} \
                  --quant_bit ${{ github.event.inputs.quant_bit }} \
                  --quant_block ${{ github.event.inputs.quant_block }} \
                  --output_dir ./converted
 
+        # 检查转换结果
+        if [ ! -d "./converted" ]; then
+          echo "Error: Conversion failed - output directory not created"
+          exit 1
+        fi
+        
         # 重命名输出文件
         mv ./converted/*.${{ github.event.inputs.export_format }} ./converted/${{ env.MODEL_NAME }}.${{ github.event.inputs.export_format }}
 
