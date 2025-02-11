@@ -1,5 +1,8 @@
 name: Model Conversion Workflow
 
+permissions:
+  contents: write    # 添加内容写入权限
+
 on:
   workflow_dispatch:
     inputs:
@@ -38,7 +41,6 @@ jobs:
       with:
         python-version: '3.10'
 
-    # 添加 pip 缓存
     - name: Cache pip packages
       uses: actions/cache@v4
       with:
@@ -164,29 +166,23 @@ jobs:
       run: |
         cd ${{ github.workspace }}/models/converted
         
-        # 创建临时目录用于整理文件
         mkdir -p package_temp
         
-        # 复制所需文件，排除 onnx 目录
         cp config.json package_temp/ || true
         cp *.bin package_temp/ || true
         cp llm.mnn* package_temp/ || true
         cp llm_config.json package_temp/ || true
         cp tokenizer.txt package_temp/ || true
         
-        # 切换到临时目录
         cd package_temp
         
-        # 创建压缩包
         tar -czvf ../${{ env.MODEL_NAME }}.tar.gz *
         
-        # 检查压缩包是否创建成功
         if [ ! -f ../${{ env.MODEL_NAME }}.tar.gz ]; then
           echo "Error: Failed to create archive"
           exit 1
         fi
         
-        # 清理临时目录
         cd ..
         rm -rf package_temp
 
@@ -199,8 +195,10 @@ jobs:
 
     - name: Create GitHub Release
       uses: softprops/action-gh-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
-        tag_name: converted-${{ env.MODEL_NAME }}-$(date +%s)
+        tag_name: "release-${{ env.MODEL_NAME }}-${{ github.run_number }}"
         name: "${{ env.MODEL_NAME }} ${{ github.event.inputs.export_format }} Model"
         body: |
           Conversion Details:
@@ -208,12 +206,11 @@ jobs:
           - Format: ${{ github.event.inputs.export_format }}
           - Quantization: ${{ github.event.inputs.quant_bit }}bit
           - Block Size: ${{ github.event.inputs.quant_block }}
+          - Build: ${{ github.run_number }}
         files: |
           ${{ github.workspace }}/models/converted/${{ env.MODEL_NAME }}.tar.gz
         draft: false
         prerelease: false
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Cleanup resources
       if: always()
