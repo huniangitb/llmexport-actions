@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       model_url:
-        description: '模型下载URL (支持任意Git仓库/HuggingFace)'
+        description: '模型下载URL (支持任意Git仓库/HuggingFace/压缩包URL)'
         required: true
       export_format:
         description: '导出格式 (例如: mnn)'
@@ -187,9 +187,10 @@ jobs:
         pwd 
         ls
         rm -rf package_temp
-        - name: List files in archive
-        id: list_files
-        run: |
+
+    - name: List files in archive
+      id: list_files
+      run: |
         cd ${{ github.workspace }}/models/converted
         ls
         unzip -l ${{ env.MODEL_NAME }}.zip > file_list.txt || { echo "Error: Failed to list files in archive"; exit 1; }
