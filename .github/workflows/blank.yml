@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       model_url:
-        description: '模型下载URL (支持任意Git仓库/HuggingFace/压缩包URL)'
+        description: '模型下载URL (支持任意Git仓库/HuggingFace)'
         required: true
       export_format:
         description: '导出格式 (例如: mnn)'
@@ -176,9 +176,9 @@ jobs:
         
         cd package_temp
         
-        tar -czvf ../${{ env.MODEL_NAME }}.tar.gz *
+        zip -r ../${{ env.MODEL_NAME }}.zip ./*
         
-        if [ ! -f ../${{ env.MODEL_NAME }}.tar.gz ]; then
+        if [ ! -f ../${{ env.MODEL_NAME }}.zip ]; then
           echo "Error: Failed to create archive"
           exit 1
         fi
@@ -189,14 +189,14 @@ jobs:
     - name: List files in archive
       id: list_files
       run: |
-        tar -tzf ${{ env.MODEL_NAME }}.tar.gz > file_list.txt
+        unzip -l ${{ env.MODEL_NAME }}.zip > file_list.txt
         cat file_list.txt
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
         name: converted-${{ env.MODEL_NAME }}
-        path: ${{ github.workspace }}/models/converted/${{ env.MODEL_NAME }}.tar.gz
+        path: ${{ github.workspace }}/models/converted/${{ env.MODEL_NAME }}.zip
         retention-days: 7
 
     - name: Create GitHub Release
@@ -216,7 +216,7 @@ jobs:
           - Archive Contents:
           $(cat file_list.txt)
         files: |
-          ${{ github.workspace }}/models/converted/${{ env.MODEL_NAME }}.tar.gz
+          ${{ github.workspace }}/models/converted/${{ env.MODEL_NAME }}.zip
         draft: false
         prerelease: false
 
