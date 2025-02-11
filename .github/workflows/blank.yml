@@ -1,7 +1,7 @@
 name: Model Conversion Workflow
 
 permissions:
-  contents: write    # 添加内容写入权限
+  contents: write
 
 on:
   workflow_dispatch:
@@ -186,6 +186,12 @@ jobs:
         cd ..
         rm -rf package_temp
 
+    - name: List files in archive
+      id: list_files
+      run: |
+        tar -tzf ${{ env.MODEL_NAME }}.tar.gz > file_list.txt
+        cat file_list.txt
+
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
@@ -202,11 +208,13 @@ jobs:
         name: "${{ env.MODEL_NAME }} ${{ github.event.inputs.export_format }} Model"
         body: |
           Conversion Details:
-          - Source: ${{ github.event.inputs.model_url }}
+          - Source: [${{ github.event.inputs.model_url }}](${{ github.event.inputs.model_url }})
           - Format: ${{ github.event.inputs.export_format }}
           - Quantization: ${{ github.event.inputs.quant_bit }}bit
           - Block Size: ${{ github.event.inputs.quant_block }}
           - Build: ${{ github.run_number }}
+          - Archive Contents:
+          $(cat file_list.txt)
         files: |
           ${{ github.workspace }}/models/converted/${{ env.MODEL_NAME }}.tar.gz
         draft: false
