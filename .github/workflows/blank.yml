@@ -50,12 +50,14 @@ jobs:
     - name: Setup system tools
       run: |
         sudo apt-get update
-        sudo apt-get install -y wget unzip git tree
+        # 加入 git-lfs 安装以确保支持大文件拉取
+        sudo apt-get install -y wget unzip git tree git-lfs
+        git lfs install
 
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-version: '3.12'
+        python-version: '3.10'
 
     - name: Cache pip packages
       uses: actions/cache@v4
@@ -119,6 +121,8 @@ jobs:
     - name: Install Python dependencies
       run: |
         python -m pip install --upgrade pip
+        pip install torch transformers accelerate tqdm
+        pip install "mnn>=2.0.0"
         pip install llmexport
 
     - name: Download model
@@ -132,22 +136,26 @@ jobs:
         
         download_status=0
         
+        # 确保 git lfs 被初始化
+        git lfs install
+        
         # 检查是否是HuggingFace模型ID
         if [[ $MODEL_URL != http* ]]; then
-          echo "Downloading from HuggingFace by model ID: $MODEL_URL"
-          huggingface-cli download $MODEL_URL \
-            --local-dir ./${{ env.MODEL_NAME }} \
-            --local-dir-use-symlinks False \
-            --resume-download || download_status=$?
+          echo "Cloning from HuggingFace by model ID using Git LFS: $MODEL_URL"
+          if [ -n "$HF_TOKEN" ]; then
+            git clone --depth 1 "https://oauth2:${HF_TOKEN}@huggingface.co/$MODEL_URL" ./${{ env.MODEL_NAME }} || download_status=$?
+          else
+            git clone --depth 1 "https://huggingface.co/$MODEL_URL" ./${{ env.MODEL_NAME }} || download_status=$?
+          fi
         elif [[ $MODEL_URL == *"huggingface.co"* ]]; then
-          echo "Downloading from HuggingFace URL..."
-          # 提取模型ID
-          HF_ID=$(echo "$MODEL_URL" | sed -n 's|.*huggingface\.co/\([^/]\{1,\}/[^/]\{1,\}\).*|\1|p')
-          huggingface-cli download $HF_ID \
-            --local-dir ./${{ env.MODEL_NAME }} \
-            --local-dir-use-symlinks False \
-            --token $HF_TOKEN \
-            --resume-download || download_status=$?
+          echo "Cloning from HuggingFace URL using Git LFS..."
+          REPO_URL="$MODEL_URL"
+          # 如果带有 Token 且原链接未包含账号信息，则注入 Token
+          if [ -n "$HF_TOKEN" ] && [[ "$REPO_URL" != *"@"* ]]; then
+            REPO_PATH=$(echo "$REPO_URL" | sed -n 's|.*huggingface\.co/\(.*\)|\1|p')
+            REPO_URL="https://oauth2:${HF_TOKEN}@huggingface.co/${REPO_PATH}"
+          fi
+          git clone --depth 1 "$REPO_URL" ./${{ env.MODEL_NAME }} || download_status=$?
         elif [[ $MODEL_URL == *.zip ]]; then
           echo "Downloading zip archive..."
           wget -q "$MODEL_URL" -O model.zip && \
@@ -159,7 +167,7 @@ jobs:
           mkdir -p ./${{ env.MODEL_NAME }} && \
           tar xzf model.tar.gz -C ./${{ env.MODEL_NAME }} || download_status=$?
         else
-          echo "Attempting to clone repository..."
+          echo "Attempting to clone repository using Git LFS..."
           git clone --depth 1 "$MODEL_URL" ./${{ env.MODEL_NAME }} || download_status=$?
         fi
         
@@ -285,7 +293,6 @@ jobs:
         if-no-files-found: error
 
     - name: Create GitHub Release
-      # [修改处]：将 action-gh-release@v1 升级到了 @v2，以修复 Node.js 版本弃用警告
       uses: softprops/action-gh-release@v2
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
