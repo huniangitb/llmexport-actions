@@ -19,7 +19,7 @@ on:
         required: true
         default: '4'
       lm_quant_bit:
-        description: 'LM Head 层量化位数 (可选)'
+        description: 'LM Head 层量化位数 (留空则使用 quant_bit 的值)'
         required: false
         default: ''
       quant_block:
@@ -54,6 +54,7 @@ jobs:
     - name: Setup system tools
       run: |
         sudo apt-get update
+        # 加入 git-lfs 安装以确保支持大文件拉取
         sudo apt-get install -y wget unzip git tree git-lfs
         git lfs install
 
@@ -62,11 +63,28 @@ jobs:
       with:
         python-version: '3.12'
 
+    - name: Create requirements file
+      run: |
+        cat > requirements.txt << 'EOF'
+        torch
+        transformers
+        accelerate
+        tqdm
+        datasets
+        sentencepiece
+        protobuf
+        scipy
+        mnn>=2.0.0
+        llmexport
+        EOF
+        echo "Created requirements.txt with content:"
+        cat requirements.txt
+
     - name: Cache pip packages
       uses: actions/cache@v4
       with:
         path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
         restore-keys: |
           ${{ runner.os }}-pip-
 
@@ -120,13 +138,11 @@ jobs:
         sudo mkswap /swapfile
         sudo swapon /swapfile
         free -h
+
     - name: Install Python dependencies
       run: |
         python -m pip install --upgrade pip
-        # 添加了 datasets, sentencepiece, protobuf 和 scipy 等常见依赖
-        pip install torch transformers accelerate tqdm datasets sentencepiece protobuf scipy
-        pip install "mnn>=2.0.0"
-        pip install llmexport
+        pip install -r requirements.txt
 
     - name: Download model
       env:
@@ -206,9 +222,12 @@ jobs:
                      --quant_bit ${{ github.event.inputs.quant_bit }} \
                      --quant_block ${{ github.event.inputs.quant_block }}"
         
-        # 添加语言模型量化位数参数（如果设置了）
+        # 添加 LM Head 层量化位数（如果指定了且不为空）
         if [ -n "${{ github.event.inputs.lm_quant_bit }}" ]; then
           CONVERT_CMD="$CONVERT_CMD --lm_quant_bit ${{ github.event.inputs.lm_quant_bit }}"
+          echo "Using separate LM Head quantization: ${{ github.event.inputs.lm_quant_bit }} bits"
+        else
+          echo "LM Head quantization will use same value as quant_bit: ${{ github.event.inputs.quant_bit }} bits"
         fi
         
         # 添加量化算法选项
@@ -238,65 +257,24 @@ jobs:
         echo "Conversion completed. Output directory contents:"
         ls -la ./converted/
 
-    - name: Archive converted model
-      run: |
-        cd ${{ github.workspace }}/models
-        
-        # 创建临时目录用于打包
-        mkdir -p ./package_temp
-        
-        # 复制转换后的文件
-        if [ -d "./converted" ]; then
-          cp -r ./converted/* ./package_temp/ 2>/dev/null || true
-        fi
-        
-        # 如果package_temp为空，报错
-        if [ -z "$(ls -A ./package_temp)" ]; then
-          echo "Error: No files to archive"
-          exit 1
-        fi
-        
-        # 创建压缩包
-        cd ./package_temp
-        echo "Creating archive with files:"
-        ls -la
-        
-        # 使用绝对路径创建压缩包
-        zip -r "${{ github.workspace }}/models/${{ env.MODEL_NAME }}.zip" ./*
-        
-        cd "${{ github.workspace }}/models"
-        
-        if [ ! -f "./${{ env.MODEL_NAME }}.zip" ]; then
-          echo "Error: Failed to create archive"
-          pwd
-          ls -la
-          exit 1
-        fi
-        
-        # 清理临时目录
-        rm -rf ./package_temp
-        
-        echo "Archive created successfully:"
-        ls -la "./${{ env.MODEL_NAME }}.zip"
-
-    - name: List files in archive
+    - name: List converted files
       id: list_files
       run: |
-        cd ${{ github.workspace }}/models
-        if [ -f "./${{ env.MODEL_NAME }}.zip" ]; then
-          FILE_LIST=$(unzip -l "./${{ env.MODEL_NAME }}.zip")
-          echo "file_list<<EOF" >> $GITHUB_ENV
-          echo "$FILE_LIST" >> $GITHUB_ENV
-          echo "EOF" >> $GITHUB_ENV
-        else
-          echo "file_list=Archive file not found" >> $GITHUB_ENV
-        fi
+        cd ${{ github.workspace }}/models/converted
+        echo "Converted files:"
+        ls -la
+        
+        # 生成文件列表用于release body
+        FILE_LIST=$(ls -la)
+        echo "file_list<<EOF" >> $GITHUB_ENV
+        echo "$FILE_LIST" >> $GITHUB_ENV
+        echo "EOF" >> $GITHUB_ENV
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
         name: converted-${{ env.MODEL_NAME }}
-        path: ${{ github.workspace }}/models/${{ env.MODEL_NAME }}.zip
+        path: ${{ github.workspace }}/models/converted/
         retention-days: 7
         if-no-files-found: error
 
@@ -312,18 +290,18 @@ jobs:
           - Source: ${{ github.event.inputs.model_url }}
           - Format: ${{ github.event.inputs.export_format }}
           - Quantization: ${{ github.event.inputs.quant_bit }}bit
-          - LM Quant Bit: ${{ github.event.inputs.lm_quant_bit || 'Same as quant_bit' }}
+          - LM Head Quant: ${{ github.event.inputs.lm_quant_bit || 'Same as quant_bit' }}
           - Block Size: ${{ github.event.inputs.quant_block }}
           - Quant Algorithm: ${{ github.event.inputs.quant_algorithm || 'None' }}
           - Symmetric Quant: ${{ github.event.inputs.symmetric_quant }}
           - Build: ${{ github.run_number }}
           
-          Archive Contents:
+          Converted Files:
           ```
           ${{ env.file_list }}
           ```
         files: |
-          ${{ github.workspace }}/models/${{ env.MODEL_NAME }}.zip
+          ${{ github.workspace }}/models/converted/**
         draft: false
         prerelease: false
 
