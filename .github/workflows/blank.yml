@@ -29,7 +29,7 @@ on:
       quant_algorithm:
         description: '量化算法 (awq/hqq/smooth/无)'
         required: false
-        default: false
+        default: ''
         type: choice
         options:
           - ''
@@ -39,7 +39,7 @@ on:
       symmetric_quant:
         description: '启用对称量化 (--sym)'
         required: false
-        default: 'false'
+        default: false
         type: boolean
 
 jobs:
