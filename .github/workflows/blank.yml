@@ -35,7 +35,7 @@ on:
       symmetric_quant:
         description: '启用对称量化 (--sym)'
         required: false
-        default: 'false'
+        default: false
         type: boolean
 
 jobs:
@@ -57,7 +57,7 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-version: '3.10'
+        python-version: '3.12'
 
     - name: Cache pip packages
       uses: actions/cache@v4
