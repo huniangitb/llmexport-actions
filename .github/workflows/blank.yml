@@ -18,6 +18,10 @@ on:
         description: '量化位数'
         required: true
         default: '4'
+      lm_quant_bit:
+        description: 'LM Head 层量化位数 (可选)'
+        required: false
+        default: ''
       quant_block:
         description: '量化块大小'
         required: true
@@ -50,7 +54,6 @@ jobs:
     - name: Setup system tools
       run: |
         sudo apt-get update
-        # 加入 git-lfs 安装以确保支持大文件拉取
         sudo apt-get install -y wget unzip git tree git-lfs
         git lfs install
 
@@ -203,6 +206,11 @@ jobs:
                      --quant_bit ${{ github.event.inputs.quant_bit }} \
                      --quant_block ${{ github.event.inputs.quant_block }}"
         
+        # 添加语言模型量化位数参数（如果设置了）
+        if [ -n "${{ github.event.inputs.lm_quant_bit }}" ]; then
+          CONVERT_CMD="$CONVERT_CMD --lm_quant_bit ${{ github.event.inputs.lm_quant_bit }}"
+        fi
+        
         # 添加量化算法选项
         if [ -n "${{ github.event.inputs.quant_algorithm }}" ]; then
           CONVERT_CMD="$CONVERT_CMD --${{ github.event.inputs.quant_algorithm }}"
@@ -304,6 +312,7 @@ jobs:
           - Source: ${{ github.event.inputs.model_url }}
           - Format: ${{ github.event.inputs.export_format }}
           - Quantization: ${{ github.event.inputs.quant_bit }}bit
+          - LM Quant Bit: ${{ github.event.inputs.lm_quant_bit || 'Same as quant_bit' }}
           - Block Size: ${{ github.event.inputs.quant_block }}
           - Quant Algorithm: ${{ github.event.inputs.quant_algorithm || 'None' }}
           - Symmetric Quant: ${{ github.event.inputs.symmetric_quant }}
