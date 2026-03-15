@@ -9,6 +9,7 @@ on:
       model_url:
         description: '模型下载URL (支持任意Git仓库/HuggingFace/压缩包URL)'
         required: true
+        default: 'tencent/HY-MT1.5-1.8B'
       export_format:
         description: '导出格式 (例如: mnn)'
         required: true
@@ -21,6 +22,21 @@ on:
         description: '量化块大小'
         required: true
         default: '128'
+      quant_algorithm:
+        description: '量化算法 (awq/hqq/smooth/无)'
+        required: false
+        default: ''
+        type: choice
+        options:
+          - ''
+          - 'awq'
+          - 'hqq'
+          - 'smooth'
+      symmetric_quant:
+        description: '启用对称量化 (--sym)'
+        required: false
+        default: 'false'
+        type: boolean
 
 jobs:
   convert_model:
@@ -34,7 +50,7 @@ jobs:
     - name: Setup system tools
       run: |
         sudo apt-get update
-        sudo apt-get install -y wget unzip git
+        sudo apt-get install -y wget unzip git tree
 
     - name: Set up Python
       uses: actions/setup-python@v5
@@ -61,10 +77,15 @@ jobs:
           exit 1
         fi
         
-        if [[ $MODEL_URL == *"huggingface.co"* ]]; then
+        # 处理HuggingFace模型ID或URL
+        if [[ $MODEL_URL != http* ]]; then
+          # 如果直接是模型ID (如 tencent/HY-MT1.5-1.8B)
+          MODEL_NAME=$(echo "$MODEL_URL" | sed 's/\/$//')
+          echo "Source type: HuggingFace Model ID"
+        elif [[ $MODEL_URL == *"huggingface.co"* ]]; then
           MODEL_NAME=$(echo "$MODEL_URL" | sed -n 's|.*huggingface\.co/\([^/]\{1,\}/[^/]\{1,\}\).*|\1|p')
           [ -z "$MODEL_NAME" ] && MODEL_NAME=$(echo "$MODEL_URL" | awk -F/ '{print $(NF-1)"/"$NF}')
-          echo "Source type: HuggingFace"
+          echo "Source type: HuggingFace URL"
         elif [[ $MODEL_URL == *.git ]] || [[ $MODEL_URL == *"/tree/"* ]] || [[ $MODEL_URL == *"/blob/"* ]]; then
           MODEL_NAME=$(echo "$MODEL_URL" | awk -F/ '{print $(NF-1)"/"$NF}' | sed 's/\.git$//')
           echo "Source type: Git Repository"
@@ -76,6 +97,9 @@ jobs:
           MODEL_NAME=$(basename "$MODEL_URL" | sed 's/\.git$//')
           echo "Source type: Unknown (treating as git)"
         fi
+        
+        # 清理模型名称，移除特殊字符
+        MODEL_NAME=$(echo "$MODEL_NAME" | sed 's/[\/]/_/g')
         
         echo "Extracted model name: ${MODEL_NAME}"
         echo "MODEL_NAME=${MODEL_NAME}" >> $GITHUB_ENV
@@ -95,13 +119,16 @@ jobs:
     - name: Install Python dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install torch transformers accelerate llmexport tqdm
+        pip install torch transformers accelerate tqdm
         pip install "mnn>=2.0.0"
         pip install huggingface_hub
+        # 安装llmexport
+        pip install git+https://github.com/wangzhaode/llmexport.git
 
     - name: Download model
       env:
         HF_TOKEN: ${{ secrets.HUGGINGFACE_TOKEN }}
+        MODEL_URL: ${{ github.event.inputs.model_url }}
       run: |
         set -x
         mkdir -p ${{ github.workspace }}/models
@@ -109,24 +136,35 @@ jobs:
         
         download_status=0
         
-        if [[ $MODEL_URL == *"huggingface.co"* ]]; then
-          echo "Downloading from HuggingFace..."
-          huggingface-cli download ${{ env.REPO_ID }} \
-            --cache-dir . \
+        # 检查是否是HuggingFace模型ID
+        if [[ $MODEL_URL != http* ]]; then
+          echo "Downloading from HuggingFace by model ID: $MODEL_URL"
+          huggingface-cli download $MODEL_URL \
+            --local-dir ./${{ env.MODEL_NAME }} \
+            --local-dir-use-symlinks False \
+            --resume-download || download_status=$?
+        elif [[ $MODEL_URL == *"huggingface.co"* ]]; then
+          echo "Downloading from HuggingFace URL..."
+          # 提取模型ID
+          HF_ID=$(echo "$MODEL_URL" | sed -n 's|.*huggingface\.co/\([^/]\{1,\}/[^/]\{1,\}\).*|\1|p')
+          huggingface-cli download $HF_ID \
+            --local-dir ./${{ env.MODEL_NAME }} \
+            --local-dir-use-symlinks False \
             --token $HF_TOKEN \
-            --resume-download \
-            --local-dir ${{ env.MODEL_NAME }} || download_status=$?
+            --resume-download || download_status=$?
         elif [[ $MODEL_URL == *.zip ]]; then
           echo "Downloading zip archive..."
-          wget -q ${{ github.event.inputs.model_url }} -O model.zip && \
-          unzip -q model.zip -d ${{ env.MODEL_NAME }} || download_status=$?
+          wget -q "$MODEL_URL" -O model.zip && \
+          mkdir -p ./${{ env.MODEL_NAME }} && \
+          unzip -q model.zip -d ./${{ env.MODEL_NAME }} || download_status=$?
         elif [[ $MODEL_URL == *.tar.gz ]] || [[ $MODEL_URL == *.tgz ]]; then
           echo "Downloading tar archive..."
-          wget -q ${{ github.event.inputs.model_url }} -O model.tar.gz && \
-          tar xzf model.tar.gz -C ${{ env.MODEL_NAME }} || download_status=$?
+          wget -q "$MODEL_URL" -O model.tar.gz && \
+          mkdir -p ./${{ env.MODEL_NAME }} && \
+          tar xzf model.tar.gz -C ./${{ env.MODEL_NAME }} || download_status=$?
         else
           echo "Attempting to clone repository..."
-          git clone --depth 1 ${{ github.event.inputs.model_url }} ${{ env.MODEL_NAME }} || download_status=$?
+          git clone --depth 1 "$MODEL_URL" ./${{ env.MODEL_NAME }} || download_status=$?
         fi
         
         if [ $download_status -ne 0 ]; then
@@ -134,73 +172,121 @@ jobs:
           exit 1
         fi
         
-        if [ ! -d "${{ env.MODEL_NAME }}" ]; then
+        if [ ! -d "./${{ env.MODEL_NAME }}" ]; then
           echo "Error: Model directory not found after download"
+          ls -la
           exit 1
         fi
+        
+        echo "Download completed. Model directory contents:"
+        ls -la ./${{ env.MODEL_NAME }}
 
     - name: Convert model
       run: |
         set -x
         cd ${{ github.workspace }}/models
         
-        if [ ! -d "${{ env.MODEL_NAME }}" ]; then
-          echo "Error: Model directory not found"
+        MODEL_PATH="./${{ env.MODEL_NAME }}"
+        if [ ! -d "$MODEL_PATH" ]; then
+          echo "Error: Model directory not found: $MODEL_PATH"
+          ls -la
           exit 1
         fi
         
-        mkdir -p ./converted
+        # 构建转换命令
+        CONVERT_CMD="llmexport --path $MODEL_PATH \
+                     --export ${{ github.event.inputs.export_format }} \
+                     --quant_bit ${{ github.event.inputs.quant_bit }} \
+                     --quant_block ${{ github.event.inputs.quant_block }}"
         
-        llmexport --path ${{ env.MODEL_NAME }} \
-                 --export ${{ github.event.inputs.export_format }} \
-                 --quant_bit ${{ github.event.inputs.quant_bit }} \
-                 --quant_block ${{ github.event.inputs.quant_block }} \
-                 --dst_path ./converted
+        # 添加量化算法选项
+        if [ -n "${{ github.event.inputs.quant_algorithm }}" ]; then
+          CONVERT_CMD="$CONVERT_CMD --${{ github.event.inputs.quant_algorithm }}"
+        fi
+        
+        # 添加对称量化选项
+        if [ "${{ github.event.inputs.symmetric_quant }}" == "true" ]; then
+          CONVERT_CMD="$CONVERT_CMD --sym"
+        fi
+        
+        # 添加输出路径
+        CONVERT_CMD="$CONVERT_CMD --dst_path ./converted"
+        
+        echo "Running conversion command:"
+        echo "$CONVERT_CMD"
+        
+        # 执行转换
+        eval $CONVERT_CMD
 
         if [ ! -d "./converted" ]; then
           echo "Error: Conversion failed - output directory not created"
           exit 1
         fi
+        
+        echo "Conversion completed. Output directory contents:"
+        ls -la ./converted/
 
     - name: Archive converted model
       run: |
-        cd ${{ github.workspace }}/models/converted
+        cd ${{ github.workspace }}/models
         
-        mkdir -p package_temp
+        # 创建临时目录用于打包
+        mkdir -p ./package_temp
         
-        cp config.json package_temp/ || true
-        cp *.bin package_temp/ || true
-        cp llm.mnn* package_temp/ || true
-        cp llm_config.json package_temp/ || true
-        cp tokenizer.txt package_temp/ || true
+        # 复制转换后的文件
+        if [ -d "./converted" ]; then
+          cp -r ./converted/* ./package_temp/ 2>/dev/null || true
+        fi
         
-        cd package_temp
-        
-        zip -r ../${{ env.MODEL_NAME }}.zip ./*
-        
-        if [ ! -f ../${{ env.MODEL_NAME }}.zip ]; then
-          echo "Error: Failed to create archive"
+        # 如果package_temp为空，报错
+        if [ -z "$(ls -A ./package_temp)" ]; then
+          echo "Error: No files to archive"
           exit 1
         fi
         
-        cd ..
-        rm -rf package_temp
+        # 创建压缩包
+        cd ./package_temp
+        echo "Creating archive with files:"
+        ls -la
+        
+        # 使用绝对路径创建压缩包
+        zip -r "${{ github.workspace }}/models/${{ env.MODEL_NAME }}.zip" ./*
+        
+        cd "${{ github.workspace }}/models"
+        
+        if [ ! -f "./${{ env.MODEL_NAME }}.zip" ]; then
+          echo "Error: Failed to create archive"
+          pwd
+          ls -la
+          exit 1
+        fi
+        
+        # 清理临时目录
+        rm -rf ./package_temp
+        
+        echo "Archive created successfully:"
+        ls -la "./${{ env.MODEL_NAME }}.zip"
 
     - name: List files in archive
       id: list_files
       run: |
-        cd ${{ github.workspace }}/models/converted
-        FILE_LIST=$(unzip -l ${{ env.MODEL_NAME }}.zip)
-        echo "file_list<<EOF" >> $GITHUB_ENV
-        echo "$FILE_LIST" >> $GITHUB_ENV
-        echo "EOF" >> $GITHUB_ENV
+        cd ${{ github.workspace }}/models
+        if [ -f "./${{ env.MODEL_NAME }}.zip" ]; then
+          FILE_LIST=$(unzip -l "./${{ env.MODEL_NAME }}.zip")
+          echo "file_list<<EOF" >> $GITHUB_ENV
+          echo "$FILE_LIST" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+        else
+          echo "file_list=Archive file not found" >> $GITHUB_ENV
+        fi
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
         name: converted-${{ env.MODEL_NAME }}
-        path: ${{ github.workspace }}/models/converted/${{ env.MODEL_NAME }}.zip
+        path: ${{ github.workspace }}/models/${{ env.MODEL_NAME }}.zip
         retention-days: 7
+        if-no-files-found: error
 
     - name: Create GitHub Release
       uses: softprops/action-gh-release@v1
@@ -211,22 +297,27 @@ jobs:
         name: "${{ env.MODEL_NAME }} ${{ github.event.inputs.export_format }} Model"
         body: |
           Conversion Details:
-          - Source: [${{ github.event.inputs.model_url }}](${{ github.event.inputs.model_url }})
+          - Source: ${{ github.event.inputs.model_url }}
           - Format: ${{ github.event.inputs.export_format }}
           - Quantization: ${{ github.event.inputs.quant_bit }}bit
           - Block Size: ${{ github.event.inputs.quant_block }}
+          - Quant Algorithm: ${{ github.event.inputs.quant_algorithm || 'None' }}
+          - Symmetric Quant: ${{ github.event.inputs.symmetric_quant }}
           - Build: ${{ github.run_number }}
-          - Archive Contents:
+          
+          Archive Contents:
+          ```
           ${{ env.file_list }}
+          ```
         files: |
-          ${{ github.workspace }}/models/converted/${{ env.MODEL_NAME }}.zip
+          ${{ github.workspace }}/models/${{ env.MODEL_NAME }}.zip
         draft: false
         prerelease: false
 
     - name: Cleanup resources
       if: always()
       run: |
-        sudo swapoff /swapfile
+        sudo swapoff /swapfile || true
         df -h
-        sudo rm -f /swapfile
+        sudo rm -f /swapfile || true
         rm -rf ${{ github.workspace }}/models
