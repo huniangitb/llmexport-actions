@@ -94,7 +94,14 @@ jobs:
         protobuf
         scipy
         mnn>=3.6.1
-        llmexport
+        onnx
+        onnxslim
+        onnxruntime
+        peft
+        Pillow
+        Requests
+        yaspin
+        numpy
         EOF
         echo "Created requirements.txt with content:"
         cat requirements.txt
@@ -223,12 +230,20 @@ jobs:
         echo "Download completed. Model directory contents:"
         ls -la ./${{ env.MODEL_NAME }}
 
+    - name: Checkout MNN export tools
+      run: |
+        set -eo pipefail
+        cd ${{ github.workspace }}
+        # PyPI llmexport 包缺少 utils 子模块, 改用 MNN 主线源码中的导出脚本
+        git clone --depth 1 https://github.com/alibaba/MNN.git MNN-src
+        ls MNN-src/transformers/llm/export/llmexport.py
+        echo "LLMEXPORT_SCRIPT=${{ github.workspace }}/MNN-src/transformers/llm/export/llmexport.py" >> $GITHUB_ENV
+
     - name: Build MNNConvert (optional)
       if: ${{ github.event.inputs.build_converter == 'true' }}
       run: |
         set -eo pipefail
         cd ${{ github.workspace }}
-        git clone --depth 1 https://github.com/alibaba/MNN.git MNN-src
         cmake -B MNN-src/build_convert -S MNN-src \
           -DMNN_BUILD_CONVERTER=ON -DMNN_BUILD_BENCHMARK=OFF \
           -DMNN_BUILD_TEST=OFF -DMNN_BUILD_DEMO=OFF \
@@ -250,8 +265,8 @@ jobs:
           exit 1
         fi
         
-        # 构建转换命令
-        CONVERT_CMD="llmexport --path $MODEL_PATH \
+        # 构建转换命令 (使用 MNN 主线源码脚本, pip 包缺 utils 模块)
+        CONVERT_CMD="python ${{ env.LLMEXPORT_SCRIPT }} --path $MODEL_PATH \
                      --export ${{ github.event.inputs.export_format }} \
                      --quant_bit ${{ github.event.inputs.quant_bit }} \
                      --quant_block ${{ github.event.inputs.quant_block }}"
