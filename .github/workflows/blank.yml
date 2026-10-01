@@ -41,6 +41,25 @@ on:
         required: false
         default: false
         type: boolean
+      generate_for_npu:
+        description: 'NPU 导出 (--generate_for_npu, 自动关闭 transformer_c4)'
+        required: false
+        default: false
+        type: boolean
+      seperate_embed:
+        description: '分离 embedding 为 bf16 (--seperate_embed)'
+        required: false
+        default: false
+        type: boolean
+      build_converter:
+        description: '编译 MNNConvert 二进制并用于转换 (NPU/HQQ 推荐)'
+        required: false
+        default: false
+        type: boolean
+      extra_args:
+        description: '自定义参数透传 (原文拼接到 llmexport 命令, 如 --transformer_c4 --act_bit 8)'
+        required: false
+        default: ''
 
 jobs:
   convert_model:
@@ -74,7 +93,7 @@ jobs:
         sentencepiece
         protobuf
         scipy
-        mnn>=2.0.0
+        mnn>=3.6.1
         llmexport
         EOF
         echo "Created requirements.txt with content:"
@@ -204,6 +223,21 @@ jobs:
         echo "Download completed. Model directory contents:"
         ls -la ./${{ env.MODEL_NAME }}
 
+    - name: Build MNNConvert (optional)
+      if: ${{ github.event.inputs.build_converter == 'true' }}
+      run: |
+        set -eo pipefail
+        cd ${{ github.workspace }}
+        git clone --depth 1 https://github.com/alibaba/MNN.git MNN-src
+        cmake -B MNN-src/build_convert -S MNN-src \
+          -DMNN_BUILD_CONVERTER=ON -DMNN_BUILD_BENCHMARK=OFF \
+          -DMNN_BUILD_TEST=OFF -DMNN_BUILD_DEMO=OFF \
+          -DMNN_BUILD_QUANTOOLS=OFF -DMNN_SEP_BUILD=OFF \
+          -DMNN_BUILD_LLM=ON -DCMAKE_BUILD_TYPE=Release
+        cmake --build MNN-src/build_convert --target MNNConvert -j$(nproc)
+        ls -lh MNN-src/build_convert/MNNConvert
+        echo "MNNCONVERT_BIN=${{ github.workspace }}/MNN-src/build_convert/MNNConvert" >> $GITHUB_ENV
+
     - name: Convert model
       run: |
         set -x
@@ -238,6 +272,30 @@ jobs:
         # 添加对称量化选项
         if [ "${{ github.event.inputs.symmetric_quant }}" == "true" ]; then
           CONVERT_CMD="$CONVERT_CMD --sym"
+        fi
+
+        # NPU 导出
+        if [ "${{ github.event.inputs.generate_for_npu }}" == "true" ]; then
+          CONVERT_CMD="$CONVERT_CMD --generate_for_npu"
+        fi
+
+        # 分离 embedding
+        if [ "${{ github.event.inputs.seperate_embed }}" == "true" ]; then
+          CONVERT_CMD="$CONVERT_CMD --seperate_embed"
+        fi
+
+        # 使用自编译 MNNConvert 二进制
+        if [ "${{ github.event.inputs.build_converter }}" == "true" ]; then
+          if [ ! -x "${MNNCONVERT_BIN}" ]; then
+            echo "Error: MNNConvert binary not found at ${MNNCONVERT_BIN}"
+            exit 1
+          fi
+          CONVERT_CMD="$CONVERT_CMD --mnnconvert ${MNNCONVERT_BIN}"
+        fi
+
+        # 自定义参数透传 (调用者保证引号/空格正确)
+        if [ -n "${{ github.event.inputs.extra_args }}" ]; then
+          CONVERT_CMD="$CONVERT_CMD ${{ github.event.inputs.extra_args }}"
         fi
         
         # 添加输出路径
@@ -294,6 +352,10 @@ jobs:
           - Block Size: ${{ github.event.inputs.quant_block }}
           - Quant Algorithm: ${{ github.event.inputs.quant_algorithm || 'None' }}
           - Symmetric Quant: ${{ github.event.inputs.symmetric_quant }}
+          - Generate for NPU: ${{ github.event.inputs.generate_for_npu }}
+          - Seperate Embed: ${{ github.event.inputs.seperate_embed }}
+          - Built MNNConvert: ${{ github.event.inputs.build_converter }}
+          - Extra Args: ${{ github.event.inputs.extra_args || 'None' }}
           - Build: ${{ github.run_number }}
           
           Converted Files:
