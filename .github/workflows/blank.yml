@@ -51,6 +51,16 @@ on:
         required: false
         default: false
         type: boolean
+      embed_bit:
+        description: 'Embedding 量化位数 (--embed_bit, 留空默认 16/bf16)'
+        required: false
+        default: ''
+        type: choice
+        options:
+          - ''
+          - '16'
+          - '8'
+          - '4'
       build_converter:
         description: '编译 MNNConvert 二进制并用于转换 (NPU/HQQ 推荐)'
         required: false
@@ -299,6 +309,12 @@ jobs:
           CONVERT_CMD="$CONVERT_CMD --seperate_embed"
         fi
 
+        # Embedding 量化位数 (留空则默认 16/bf16)
+        if [ -n "${{ github.event.inputs.embed_bit }}" ]; then
+          CONVERT_CMD="$CONVERT_CMD --embed_bit ${{ github.event.inputs.embed_bit }}"
+          echo "Using embed_bit: ${{ github.event.inputs.embed_bit }}"
+        fi
+
         # 使用自编译 MNNConvert 二进制
         if [ "${{ github.event.inputs.build_converter }}" == "true" ]; then
           if [ ! -x "${MNNCONVERT_BIN}" ]; then
@@ -369,6 +385,7 @@ jobs:
           - Symmetric Quant: ${{ github.event.inputs.symmetric_quant }}
           - Generate for NPU: ${{ github.event.inputs.generate_for_npu }}
           - Seperate Embed: ${{ github.event.inputs.seperate_embed }}
+          - Embed Bit: ${{ github.event.inputs.embed_bit || 'default (16/bf16)' }}
           - Built MNNConvert: ${{ github.event.inputs.build_converter }}
           - Extra Args: ${{ github.event.inputs.extra_args || 'None' }}
           - Build: ${{ github.run_number }}
