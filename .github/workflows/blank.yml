@@ -274,13 +274,14 @@ jobs:
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
-        DEST=${{ github.workspace }}/MNN-src/build_convert/MNNConvert
-        mkdir -p "$(dirname "$DEST")"
+        DEST=${{ github.workspace }}/MNN-src/build_convert
+        mkdir -p "$DEST"
         if gh release download "mnnconvert-cache" -R "$GITHUB_REPOSITORY" \
-             -p "MNNConvert-linux-x64-${{ env.MNN_COMMIT }}" -O "$DEST" 2>/dev/null \
-           && [ -s "$DEST" ]; then
-          chmod +x "$DEST"
-          echo "Cache hit: $DEST"
+             -p "mnnconv-linux-x64-${{ env.MNN_COMMIT }}.tar.gz" -O /tmp/mnnconv.tar.gz 2>/dev/null \
+           && [ -s /tmp/mnnconv.tar.gz ]; then
+          tar xzf /tmp/mnnconv.tar.gz -C "$DEST"
+          chmod +x "$DEST/MNNConvert"
+          echo "Cache hit: $DEST/MNNConvert"
           echo "found=true" >> $GITHUB_OUTPUT
         else
           echo "Cache miss for MNN commit ${{ env.MNN_COMMIT }}"
@@ -306,14 +307,17 @@ jobs:
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
-        BIN=${{ github.workspace }}/MNN-src/build_convert/MNNConvert
-        cp "$BIN" "/tmp/MNNConvert-linux-x64-${{ env.MNN_COMMIT }}"
+        BC=${{ github.workspace }}/MNN-src/build_convert
+        tar czf "/tmp/mnnconv-linux-x64-${{ env.MNN_COMMIT }}.tar.gz" -C "$BC" \
+          MNNConvert libMNN.so tools/converter/libMNNConvertDeps.so
         gh release create "mnnconvert-cache" --title "MNNConvert binary cache" \
-          --notes "Cached MNNConvert linux x64 builds keyed by MNN-src commit." || true
+          --notes "Cached MNNConvert linux x64 builds (binary + libs) keyed by MNN-src commit." || true
         gh release upload "mnnconvert-cache" \
-          "/tmp/MNNConvert-linux-x64-${{ env.MNN_COMMIT }}" --clobber -R "$GITHUB_REPOSITORY"
+          "/tmp/mnnconv-linux-x64-${{ env.MNN_COMMIT }}.tar.gz" --clobber -R "$GITHUB_REPOSITORY"
 
     - name: Convert model
+      env:
+        LD_LIBRARY_PATH: ${{ github.workspace }}/MNN-src/build_convert
       run: |
         set -x
         cd ${{ github.workspace }}/models
