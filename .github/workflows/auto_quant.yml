@@ -134,7 +134,7 @@ jobs:
         cd ${{ github.workspace }}/models
         python ${{ env.LLMEXPORT_SCRIPT }} --path ./${{ env.MODEL_NAME }} \
           --export mnn --quant_bit 16 --quant_block 64 \
-          --seperate_embed --embed_bit 16 \
+          --seperate_embed --embed_bit 16 --dst_path ./converted \
           --mnnconvert ${{ env.MNNCONVERT_BIN }}
         ls -la ./converted
 
