@@ -252,6 +252,22 @@ jobs:
         echo "LLMEXPORT_SCRIPT=${{ github.workspace }}/MNN-src/transformers/llm/export/llmexport.py" >> $GITHUB_ENV
         echo "MNNCONVERT_BIN=${{ github.workspace }}/MNN-src/build_convert/MNNConvert" >> $GITHUB_ENV
 
+    - name: Patch omni fp32 (bf16 weight vs fp32 act mismatch fix)
+      run: |
+        set -eo pipefail
+        python - << 'PYEOF'
+        p = "${{ github.workspace }}/MNN-src/transformers/llm/export/llmexport.py"
+        s = open(p).read()
+        old = "if self.args.awq or self.args.smooth:"
+        new = "if self.args.awq or self.args.smooth or getattr(self.args, 'omni', False):"
+        if old in s:
+            s = s.replace(old, new, 1)
+            open(p, "w").write(s)
+            print("patched: omni now loads model in fp32")
+        else:
+            print("pattern not found (upstream may have changed); no patch")
+        PYEOF
+
     - name: Restore MNNConvert from cache release
       id: mnncvt_cache
       if: ${{ github.event.inputs.build_converter == 'true' }}
