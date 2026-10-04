@@ -46,7 +46,7 @@ def cmd_prepare(args):
     model.eval()
     with torch.no_grad():
         hs = model.get_input_embeddings()(torch.tensor([ids])).to(torch.float32)  # [1,L,H]
-        pos = torch.arange(L, dtype=torch.int64)
+        pos = torch.arange(L, dtype=torch.int64).unsqueeze(0)  # [1, L] for HF rope
         out = model(inputs_embeds=hs.to(torch.bfloat16),
                     attention_mask=None, position_ids=pos)
         golden = out.logits[:, -1, :].to(torch.float32)  # [1, V], logits_index=-1 semantics
