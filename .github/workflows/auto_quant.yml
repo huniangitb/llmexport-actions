@@ -13,11 +13,11 @@ on:
       n_samples:
         description: '校准样本数'
         required: true
-        default: '24'
+        default: '12'
       seq_len:
         description: '校准序列长度'
         required: true
-        default: '128'
+        default: '96'
       block:
         description: '权重分块 (blkN)'
         required: true
@@ -30,7 +30,7 @@ on:
 jobs:
   probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
