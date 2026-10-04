@@ -85,6 +85,21 @@ jobs:
         echo "LLMEXPORT_SCRIPT=${{ github.workspace }}/MNN-src/transformers/llm/export/llmexport.py" >> $GITHUB_ENV
         echo "MNNCONVERT_BIN=${{ github.workspace }}/MNN-src/build_convert/MNNConvert" >> $GITHUB_ENV
 
+    - name: Patch llmexport keep-onnx
+      run: |
+        set -eo pipefail
+        python - << 'PYEOF'
+        import os
+        p = "${{ github.workspace }}/MNN-src/transformers/llm/export/llmexport.py"
+        s = open(p).read()
+        old = "if export_mnn:\n            # delete onnx file"
+        new = "if export_mnn and not os.environ.get('KEEP_ONNX'):\n            # delete onnx file"
+        n = s.count(old)
+        s = s.replace(old, new)
+        open(p, "w").write(s)
+        print(f"patched {n} onnx-deletion sites")
+        PYEOF
+
     - name: Restore MNNConvert from cache release
       id: mnncvt_cache
       env:
@@ -132,6 +147,7 @@ jobs:
 
     - name: Export fp16 mnn (auto_quant source model)
       env:
+        KEEP_ONNX: "1"
         LD_LIBRARY_PATH: ${{ github.workspace }}/MNN-src/build_convert
       run: |
         set -o pipefail
