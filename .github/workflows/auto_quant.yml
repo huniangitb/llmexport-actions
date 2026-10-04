@@ -1,0 +1,195 @@
+name: Auto Quant Layer Search
+
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      model_url:
+        description: '模型下载URL (HuggingFace ID)'
+        required: true
+        default: 'tencent/Hy-MT2-1.8B'
+      rate:
+        description: '目标误差率 (TESTERROR diffmax/maxv)'
+        required: true
+        default: '0.05'
+      n_tokens:
+        description: '测试序列长度'
+        required: true
+        default: '48'
+      upload_model:
+        description: '是否把搜索得到的混合精度模型上传 artifact'
+        required: false
+        default: true
+        type: boolean
+
+jobs:
+  auto_quant:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Setup system tools
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y wget unzip git tree git-lfs
+        git lfs install
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    - name: Configure swap space
+      run: |
+        sudo swapoff /swapfile || true
+        sudo rm -f /swapfile
+        sudo fallocate -l 8G /swapfile
+        sudo chmod 600 /swapfile
+        sudo mkswap /swapfile
+        sudo swapon /swapfile
+        free -h
+
+    - name: Install Python dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install torch transformers accelerate sentencepiece protobuf scipy datasets onnx onnxslim onnxruntime peft yaspin numpy mnn
+
+    - name: Download model
+      env:
+        HF_TOKEN: ${{ secrets.HUGGINGFACE_TOKEN }}
+        MODEL_URL: ${{ github.event.inputs.model_url }}
+      run: |
+        set -eo pipefail
+        mkdir -p ${{ github.workspace }}/models
+        cd ${{ github.workspace }}/models
+        MODEL_NAME=$(echo "$MODEL_URL" | sed 's/[\/]/_/g')
+        echo "MODEL_NAME=${MODEL_NAME}" >> $GITHUB_ENV
+        if [ -n "$HF_TOKEN" ]; then
+          git clone --depth 1 "https://oauth2:${HF_TOKEN}@huggingface.co/$MODEL_URL" ./${MODEL_NAME}
+        else
+          git clone --depth 1 "https://huggingface.co/$MODEL_URL" ./${MODEL_NAME}
+        fi
+        ls -la ./${MODEL_NAME}
+
+    - name: Checkout MNN export tools
+      run: |
+        set -eo pipefail
+        cd ${{ github.workspace }}
+        git clone --depth 1 https://github.com/alibaba/MNN.git MNN-src
+        MNN_COMMIT=$(git -C MNN-src rev-parse --short HEAD)
+        echo "MNN_COMMIT=${MNN_COMMIT}" >> $GITHUB_ENV
+        echo "LLMEXPORT_SCRIPT=${{ github.workspace }}/MNN-src/transformers/llm/export/llmexport.py" >> $GITHUB_ENV
+        echo "MNNCONVERT_BIN=${{ github.workspace }}/MNN-src/build_convert/MNNConvert" >> $GITHUB_ENV
+
+    - name: Restore MNNConvert from cache release
+      id: mnncvt_cache
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        DEST=${{ github.workspace }}/MNN-src/build_convert/MNNConvert
+        mkdir -p "$(dirname "$DEST")"
+        if gh release download "mnnconvert-cache" -R "$GITHUB_REPOSITORY" \
+             -p "MNNConvert-linux-x64-${{ env.MNN_COMMIT }}" -O "$DEST" 2>/dev/null \
+           && [ -s "$DEST" ]; then
+          chmod +x "$DEST"
+          echo "Cache hit: $DEST"
+          echo "found=true" >> $GITHUB_OUTPUT
+        else
+          echo "Cache miss for MNN commit ${{ env.MNN_COMMIT }}"
+          echo "found=false" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Build MNNConvert
+      if: steps.mnncvt_cache.outputs.found != 'true'
+      run: |
+        set -eo pipefail
+        cd ${{ github.workspace }}
+        cmake -B MNN-src/build_convert -S MNN-src \
+          -DMNN_BUILD_CONVERTER=ON -DMNN_BUILD_BENCHMARK=OFF \
+          -DMNN_BUILD_TEST=OFF -DMNN_BUILD_DEMO=OFF \
+          -DMNN_BUILD_QUANTOOLS=OFF -DMNN_SEP_BUILD=OFF \
+          -DMNN_BUILD_LLM=ON -DCMAKE_BUILD_TYPE=Release
+        cmake --build MNN-src/build_convert --target MNNConvert -j$(nproc)
+        ls -lh MNN-src/build_convert/MNNConvert
+
+    - name: Upload MNNConvert to cache release
+      if: steps.mnncvt_cache.outputs.found != 'true'
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        BIN=${{ github.workspace }}/MNN-src/build_convert/MNNConvert
+        cp "$BIN" "/tmp/MNNConvert-linux-x64-${{ env.MNN_COMMIT }}"
+        gh release create "mnnconvert-cache" --title "MNNConvert binary cache" \
+          --notes "Cached MNNConvert linux x64 builds keyed by MNN-src commit." || true
+        gh release upload "mnnconvert-cache" \
+          "/tmp/MNNConvert-linux-x64-${{ env.MNN_COMMIT }}" --clobber -R "$GITHUB_REPOSITORY"
+
+    - name: Export fp16 mnn (auto_quant source model)
+      run: |
+        set -eo pipefail
+        cd ${{ github.workspace }}/models
+        python ${{ env.LLMEXPORT_SCRIPT }} --path ./${{ env.MODEL_NAME }} \
+          --export mnn --quant_bit 16 --quant_block 64 \
+          --seperate_embed --embed_bit 16 \
+          --mnnconvert ${{ env.MNNCONVERT_BIN }}
+        ls -la ./converted
+
+    - name: Prepare test inputs and golden
+      run: |
+        set -eo pipefail
+        cd ${{ github.workspace }}
+        python scripts/auto_quant_search.py prepare \
+          --hf_model_dir models/${{ env.MODEL_NAME }} \
+          --calib calib_ifmt.txt \
+          --testdir ${{ github.workspace }}/testdir \
+          --n_tokens ${{ github.event.inputs.n_tokens }} \
+          --hidden_size 2048
+        cat > ${{ github.workspace }}/fwd.json << 'EOF'
+        {"backend": 0, "mode": 4, "memory": 2, "precision": 1, "hints": [5, 1]}
+        EOF
+        ls -la ${{ github.workspace }}/testdir
+
+    - name: Run block-grouped quant search
+      run: |
+        set -eo pipefail
+        cd ${{ github.workspace }}
+        python scripts/auto_quant_search.py search \
+          --model_dir ${{ github.workspace }}/models/converted \
+          --mnnconvert ${{ env.MNNCONVERT_BIN }} \
+          --dstmodel ${{ github.workspace }}/aq_result.mnn \
+          --testdir ${{ github.workspace }}/testdir \
+          --fwdjson ${{ github.workspace }}/fwd.json \
+          --rate ${{ github.event.inputs.rate }} \
+          --hqq 1 \
+          --report ${{ github.workspace }}/auto_quant_report.txt 2>&1 | tee ${{ github.workspace }}/auto_quant_search.log
+
+    - name: Summarize
+      run: |
+        echo "=== auto_quant report ==="
+        cat ${{ github.workspace }}/auto_quant_report.txt
+        echo "=== model sizes ==="
+        ls -lh ${{ github.workspace }}/aq_result.mnn ${{ github.workspace }}/models/converted/llm.mnn.weight || true
+
+    - name: Upload search results
+      uses: actions/upload-artifact@v4
+      with:
+        name: autoquant-${{ env.MODEL_NAME }}-${{ github.run_number }}
+        path: |
+          auto_quant_report.txt
+          auto_quant_search.log
+          aq_result.mnn.json
+        retention-days: 14
+        if-no-files-found: warn
+
+    - name: Upload mixed-precision model
+      if: ${{ github.event.inputs.upload_model == 'true' }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: autoquant-model-${{ github.run_number }}
+        path: aq_result.mnn
+        retention-days: 7
+        if-no-files-found: warn

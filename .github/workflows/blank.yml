@@ -246,11 +246,33 @@ jobs:
         cd ${{ github.workspace }}
         # PyPI llmexport 包缺少 utils 子模块, 改用 MNN 主线源码中的导出脚本
         git clone --depth 1 https://github.com/alibaba/MNN.git MNN-src
+        MNN_COMMIT=$(git -C MNN-src rev-parse --short HEAD)
+        echo "MNN_COMMIT=${MNN_COMMIT}" >> $GITHUB_ENV
         ls MNN-src/transformers/llm/export/llmexport.py
         echo "LLMEXPORT_SCRIPT=${{ github.workspace }}/MNN-src/transformers/llm/export/llmexport.py" >> $GITHUB_ENV
+        echo "MNNCONVERT_BIN=${{ github.workspace }}/MNN-src/build_convert/MNNConvert" >> $GITHUB_ENV
+
+    - name: Restore MNNConvert from cache release
+      id: mnncvt_cache
+      if: ${{ github.event.inputs.build_converter == 'true' }}
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        DEST=${{ github.workspace }}/MNN-src/build_convert/MNNConvert
+        mkdir -p "$(dirname "$DEST")"
+        if gh release download "mnnconvert-cache" -R "$GITHUB_REPOSITORY" \
+             -p "MNNConvert-linux-x64-${{ env.MNN_COMMIT }}" -O "$DEST" 2>/dev/null \
+           && [ -s "$DEST" ]; then
+          chmod +x "$DEST"
+          echo "Cache hit: $DEST"
+          echo "found=true" >> $GITHUB_OUTPUT
+        else
+          echo "Cache miss for MNN commit ${{ env.MNN_COMMIT }}"
+          echo "found=false" >> $GITHUB_OUTPUT
+        fi
 
     - name: Build MNNConvert (optional)
-      if: ${{ github.event.inputs.build_converter == 'true' }}
+      if: ${{ github.event.inputs.build_converter == 'true' && steps.mnncvt_cache.outputs.found != 'true' }}
       run: |
         set -eo pipefail
         cd ${{ github.workspace }}
@@ -262,6 +284,18 @@ jobs:
         cmake --build MNN-src/build_convert --target MNNConvert -j$(nproc)
         ls -lh MNN-src/build_convert/MNNConvert
         echo "MNNCONVERT_BIN=${{ github.workspace }}/MNN-src/build_convert/MNNConvert" >> $GITHUB_ENV
+
+    - name: Upload MNNConvert to cache release
+      if: ${{ github.event.inputs.build_converter == 'true' && steps.mnncvt_cache.outputs.found != 'true' }}
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        BIN=${{ github.workspace }}/MNN-src/build_convert/MNNConvert
+        cp "$BIN" "/tmp/MNNConvert-linux-x64-${{ env.MNN_COMMIT }}"
+        gh release create "mnnconvert-cache" --title "MNNConvert binary cache" \
+          --notes "Cached MNNConvert linux x64 builds keyed by MNN-src commit." || true
+        gh release upload "mnnconvert-cache" \
+          "/tmp/MNNConvert-linux-x64-${{ env.MNN_COMMIT }}" --clobber -R "$GITHUB_REPOSITORY"
 
     - name: Convert model
       run: |
