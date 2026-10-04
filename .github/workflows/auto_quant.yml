@@ -130,12 +130,14 @@ jobs:
 
     - name: Export fp16 mnn (auto_quant source model)
       run: |
-        set -eo pipefail
+        set -o pipefail
         cd ${{ github.workspace }}/models
         python ${{ env.LLMEXPORT_SCRIPT }} --path ./${{ env.MODEL_NAME }} \
           --export mnn --quant_bit 16 --quant_block 64 \
           --seperate_embed --embed_bit 16 --dst_path ./converted \
-          --mnnconvert ${{ env.MNNCONVERT_BIN }}
+          --mnnconvert ${{ env.MNNCONVERT_BIN }} 2>&1 | tee export_stdout.log || \
+          { echo "=== .export.log tail (MNNConvert stderr) ==="; tail -60 .export.log 2>/dev/null || true; ls -laR ./converted 2>/dev/null || true; exit 1; }
+        echo "=== .export.log tail ==="; tail -20 .export.log 2>/dev/null || true
         ls -la ./converted
 
     - name: Prepare test inputs and golden
