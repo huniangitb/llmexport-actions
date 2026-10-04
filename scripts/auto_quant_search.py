@@ -245,7 +245,7 @@ def main():
     sub = p.add_subparsers(dest="cmd", required=True)
 
     q = sub.add_parser("prepare")
-    q.add_argument("--model_dir", required=True)
+    q.add_argument("--model_dir", default=None)
     q.add_argument("--hf_model_dir", required=True)
     q.add_argument("--calib", required=True)
     q.add_argument("--testdir", required=True)
