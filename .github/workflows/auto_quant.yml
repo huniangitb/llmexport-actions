@@ -10,53 +10,41 @@ on:
         description: '模型下载URL (HuggingFace ID)'
         required: true
         default: 'tencent/Hy-MT2-1.8B'
-      rate:
-        description: '目标误差率 (TESTERROR diffmax/maxv)'
+      n_samples:
+        description: '校准样本数'
         required: true
-        default: '0.05'
-      n_tokens:
-        description: '测试序列长度'
+        default: '24'
+      seq_len:
+        description: '校准序列长度'
         required: true
-        default: '48'
-      upload_model:
-        description: '是否把搜索得到的混合精度模型上传 artifact'
-        required: false
-        default: true
-        type: boolean
+        default: '128'
+      block:
+        description: '权重分块 (blkN)'
+        required: true
+        default: '64'
+      modes:
+        description: '探测模式 (w4a8,w4a16,w8a8,all_w4a8,all_w8a8)'
+        required: true
+        default: 'w4a8,w4a16,w8a8,all_w4a8,all_w8a8'
 
 jobs:
-  auto_quant:
+  probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+    timeout-minutes: 120
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
-
-    - name: Setup system tools
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y wget unzip git tree git-lfs
-        git lfs install
 
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
         python-version: '3.12'
 
-    - name: Configure swap space
-      run: |
-        sudo swapoff /swapfile || true
-        sudo rm -f /swapfile
-        sudo fallocate -l 8G /swapfile
-        sudo chmod 600 /swapfile
-        sudo mkswap /swapfile
-        sudo swapon /swapfile
-        free -h
-
     - name: Install Python dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install torch transformers accelerate sentencepiece protobuf scipy datasets onnx onnxslim onnxruntime peft yaspin numpy mnn
+        pip install torch --index-url https://download.pytorch.org/whl/cpu
+        pip install transformers accelerate numpy sentencepiece protobuf
 
     - name: Download model
       env:
@@ -75,149 +63,42 @@ jobs:
         fi
         ls -la ./${MODEL_NAME}
 
-    - name: Checkout MNN export tools
-      run: |
-        set -eo pipefail
-        cd ${{ github.workspace }}
-        git clone --depth 1 https://github.com/alibaba/MNN.git MNN-src
-        MNN_COMMIT=$(git -C MNN-src rev-parse --short HEAD)
-        echo "MNN_COMMIT=${MNN_COMMIT}" >> $GITHUB_ENV
-        echo "LLMEXPORT_SCRIPT=${{ github.workspace }}/MNN-src/transformers/llm/export/llmexport.py" >> $GITHUB_ENV
-        echo "MNNCONVERT_BIN=${{ github.workspace }}/MNN-src/build_convert/MNNConvert" >> $GITHUB_ENV
-
-    - name: Patch llmexport keep-onnx
-      run: |
-        set -eo pipefail
-        python - << 'PYEOF'
-        import os
-        p = "${{ github.workspace }}/MNN-src/transformers/llm/export/llmexport.py"
-        s = open(p).read()
-        old = "if export_mnn:\n            # delete onnx file"
-        new = "if export_mnn and not os.environ.get('KEEP_ONNX'):\n            # delete onnx file"
-        n = s.count(old)
-        s = s.replace(old, new)
-        open(p, "w").write(s)
-        print(f"patched {n} onnx-deletion sites")
-        PYEOF
-
-    - name: Restore MNNConvert from cache release
-      id: mnncvt_cache
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      run: |
-        DEST=${{ github.workspace }}/MNN-src/build_convert
-        mkdir -p "$DEST"
-        if gh release download "mnnconvert-cache" -R "$GITHUB_REPOSITORY" \
-             -p "mnnconv-linux-x64-${{ env.MNN_COMMIT }}.tar.gz" -O /tmp/mnnconv.tar.gz 2>/dev/null \
-           && [ -s /tmp/mnnconv.tar.gz ]; then
-          tar xzf /tmp/mnnconv.tar.gz -C "$DEST"
-          chmod +x "$DEST/MNNConvert"
-          echo "Cache hit: $DEST/MNNConvert"
-          echo "found=true" >> $GITHUB_OUTPUT
-        else
-          echo "Cache miss for MNN commit ${{ env.MNN_COMMIT }}"
-          echo "found=false" >> $GITHUB_OUTPUT
-        fi
-
-    - name: Build MNNConvert
-      if: steps.mnncvt_cache.outputs.found != 'true'
-      run: |
-        set -eo pipefail
-        cd ${{ github.workspace }}
-        cmake -B MNN-src/build_convert -S MNN-src \
-          -DMNN_BUILD_CONVERTER=ON -DMNN_BUILD_BENCHMARK=OFF \
-          -DMNN_BUILD_TEST=OFF -DMNN_BUILD_DEMO=OFF \
-          -DMNN_BUILD_QUANTOOLS=OFF -DMNN_SEP_BUILD=OFF \
-          -DMNN_BUILD_LLM=ON -DCMAKE_BUILD_TYPE=Release
-        cmake --build MNN-src/build_convert --target MNNConvert -j$(nproc)
-        ls -lh MNN-src/build_convert/MNNConvert
-
-    - name: Upload MNNConvert to cache release
-      if: steps.mnncvt_cache.outputs.found != 'true'
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      run: |
-        BC=${{ github.workspace }}/MNN-src/build_convert
-        tar czf "/tmp/mnnconv-linux-x64-${{ env.MNN_COMMIT }}.tar.gz" -C "$BC" \
-          MNNConvert libMNN.so tools/converter/libMNNConvertDeps.so
-        gh release create "mnnconvert-cache" --title "MNNConvert binary cache" \
-          --notes "Cached MNNConvert linux x64 builds (binary + libs) keyed by MNN-src commit." || true
-        gh release upload "mnnconvert-cache" \
-          "/tmp/mnnconv-linux-x64-${{ env.MNN_COMMIT }}.tar.gz" --clobber -R "$GITHUB_REPOSITORY"
-
-    - name: Export fp16 mnn (auto_quant source model)
-      env:
-        KEEP_ONNX: "1"
-        LD_LIBRARY_PATH: ${{ github.workspace }}/MNN-src/build_convert
+    - name: Run per-layer sensitivity probe
       run: |
         set -o pipefail
-        cd ${{ github.workspace }}/models
-        python ${{ env.LLMEXPORT_SCRIPT }} --path ./${{ env.MODEL_NAME }} \
-          --export mnn --quant_bit 16 --quant_block 64 \
-          --seperate_embed --embed_bit 16 --dst_path ./converted \
-          --mnnconvert ${{ env.MNNCONVERT_BIN }} 2>&1 | tee export_stdout.log || \
-          { echo "=== .export.log tail (MNNConvert stderr) ==="; tail -60 .export.log 2>/dev/null || true; ls -laR ./converted 2>/dev/null || true; exit 1; }
-        test -f ./converted/llm.mnn || { echo "FATAL: llm.mnn missing (MNNConvert silently failed)"; tail -60 .export.log 2>/dev/null || true; exit 1; }
-        test -f ./converted/llm.mnn.json || { echo "FATAL: llm.mnn.json missing"; tail -60 .export.log 2>/dev/null || true; exit 1; }
-        echo "=== .export.log tail ==="; tail -20 .export.log 2>/dev/null || true
-        ls -la ./converted
-        # keep the full onnx (graph + external weight data) for the MNNConvert compression flow
-        test -f ./converted/onnx/llm.onnx || { echo "FATAL: converted/onnx/llm.onnx missing"; find . -name "*.onnx*" -exec ls -la {} \; ; exit 1; }
-        cp ./converted/onnx/llm.onnx* ./converted/
-        ls -la ./converted/llm.onnx*
-
-    - name: Prepare test inputs and golden
-      run: |
-        set -eo pipefail
         cd ${{ github.workspace }}
-        python scripts/auto_quant_search.py prepare \
-          --hf_model_dir models/${{ env.MODEL_NAME }} \
+        python scripts/layer_sensitivity_probe.py probe \
+          --model models/${{ env.MODEL_NAME }} \
           --calib calib_ifmt.txt \
-          --testdir ${{ github.workspace }}/testdir \
-          --n_tokens ${{ github.event.inputs.n_tokens }} \
-          --hidden_size 2048
-        cat > ${{ github.workspace }}/fwd.json << 'EOF'
-        {"backend": 0, "mode": 4, "memory": 2, "precision": 1, "hints": [5, 1]}
-        EOF
-        ls -la ${{ github.workspace }}/testdir
-
-    - name: Run block-grouped quant search
-      run: |
-        set -eo pipefail
-        cd ${{ github.workspace }}
-        python scripts/auto_quant_search.py search \
-          --model_dir ${{ github.workspace }}/models/converted \
-          --mnnconvert ${{ env.MNNCONVERT_BIN }} \
-          --dstmodel ${{ github.workspace }}/aq_result.mnn \
-          --testdir ${{ github.workspace }}/testdir \
-          --fwdjson ${{ github.workspace }}/fwd.json \
-          --rate ${{ github.event.inputs.rate }} \
-          --hqq 1 \
-          --report ${{ github.workspace }}/auto_quant_report.txt 2>&1 | tee ${{ github.workspace }}/auto_quant_search.log
+          --out probe_report.json \
+          --n_samples ${{ github.event.inputs.n_samples }} \
+          --seq_len ${{ github.event.inputs.seq_len }} \
+          --block ${{ github.event.inputs.block }} \
+          --modes "${{ github.event.inputs.modes }}" 2>&1 | tee probe_run.log
 
     - name: Summarize
       run: |
-        echo "=== auto_quant report ==="
-        cat ${{ github.workspace }}/auto_quant_report.txt
-        echo "=== model sizes ==="
-        ls -lh ${{ github.workspace }}/aq_result.mnn ${{ github.workspace }}/models/converted/llm.mnn.weight || true
+        echo "=== probe report ==="
+        python - << 'EOF'
+        import json
+        r = json.load(open('probe_report.json'))
+        whole = r.get("whole", {})
+        print("whole-model:", {k: round(v, 5) for k, v in whole.items()})
+        for tag in next(iter(r["blocks"].values())):
+            errs = sorted(((int(b[5:]), d[tag]) for b, d in r["blocks"].items()), key=lambda x: -x[1])
+            print(f"\n[{tag}] blocks by error (worst first):")
+            print("  worst5:", [(f"L{b}", round(e, 5)) for b, e in errs[:5]])
+            print("  best5: ", [(f"L{b}", round(e, 5)) for b, e in errs[-5:]])
+            med = sorted(e for _, e in errs)[len(errs)//2]
+            print(f"  median: {med:.5f}")
+        EOF
 
-    - name: Upload search results
+    - name: Upload probe results
       uses: actions/upload-artifact@v4
       with:
-        name: autoquant-${{ env.MODEL_NAME }}-${{ github.run_number }}
+        name: probe-${{ env.MODEL_NAME }}-${{ github.run_number }}
         path: |
-          auto_quant_report.txt
-          auto_quant_search.log
-          aq_result.mnn.json
+          probe_report.json
+          probe_run.log
         retention-days: 14
-        if-no-files-found: warn
-
-    - name: Upload mixed-precision model
-      if: ${{ github.event.inputs.upload_model == 'true' }}
-      uses: actions/upload-artifact@v4
-      with:
-        name: autoquant-model-${{ github.run_number }}
-        path: aq_result.mnn
-        retention-days: 7
-        if-no-files-found: warn
+        if-no-files-found: error
