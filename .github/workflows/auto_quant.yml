@@ -145,6 +145,11 @@ jobs:
         test -f ./converted/llm.mnn.json || { echo "FATAL: llm.mnn.json missing"; tail -60 .export.log 2>/dev/null || true; exit 1; }
         echo "=== .export.log tail ==="; tail -20 .export.log 2>/dev/null || true
         ls -la ./converted
+        # keep the full onnx (inline weights) for MNNConvert compression flow
+        ONNX=$(find . -name "llm.onnx" -size +100M | head -1)
+        test -n "$ONNX" || { echo "FATAL: full llm.onnx not found"; find . -name "*.onnx*" -exec ls -la {} \; ; exit 1; }
+        cp "$ONNX"* ./converted/ 2>/dev/null || true
+        ls -la ./converted/llm.onnx*
 
     - name: Prepare test inputs and golden
       run: |

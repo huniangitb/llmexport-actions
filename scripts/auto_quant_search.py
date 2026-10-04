@@ -90,7 +90,7 @@ def cmd_prepare(args):
 
 # ----------------------------------------------------------------- search ----
 def run_mnnconvert(mnnconvert, model_dir, dstmodel, dstjson, testdir, fwdjson, hqq):
-    cmd = (f"{mnnconvert} -f MNN --modelFile llm.mnn --MNNModel {dstmodel} "
+    cmd = (f"{mnnconvert} -f ONNX --modelFile llm.onnx --MNNModel {dstmodel} "
            f"--weightQuantBits=8 --weightQuantAsymmetric=0 "
            f"--compressionParamsFile {dstjson} --testdir {testdir} "
            f"--thredhold 0.001 --testconfig {fwdjson} --alignDenormalizedValue 0 ")
@@ -137,7 +137,7 @@ class QuantInfo:
                 if conv is None or conv["kernelSize"][0] * conv["kernelSize"][1] != 1:
                     continue
                 name = layer.get("opName", "")
-                m = re.search(r"/blocks\.(\d+)/", name)
+                m = re.search(r"/layers\.(\d+)/", name) or re.search(r"/blocks\.(\d+)/", name)
                 blk = int(m.group(1)) if m else None
                 special = None
                 low = name.lower()
@@ -186,7 +186,11 @@ def cmd_search(args):
     log("baseline conversion (all W8, dynamic A8)...")
     rate0, dt, info = run_mnnconvert(mnnconvert, model_dir, dstmodel, dstjson,
                                      testdir, fwdjson, hqq)
-    log(f"baseline rate={rate0:.5f} ({dt:.0f}s)")
+    log(f"baseline rate={rate0:.5f} ({dt:.0f}s); convert output head: {info[:400]!r}")
+    qi = QuantInfo(dstjson)
+    if not qi.layers:
+        head = open(dstjson).read()[:500]
+        raise RuntimeError(f"compression json has 0 conv1x1 layers; json head: {head}")
     qi = QuantInfo(dstjson)
     blocks, specials = qi.groups()
     n_layers_total = len(qi.layers)
