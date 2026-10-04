@@ -91,6 +91,9 @@ def cmd_prepare(args):
 # ----------------------------------------------------------------- search ----
 def run_mnnconvert(mnnconvert, model_dir, dstmodel, dstjson, testdir, fwdjson, hqq):
     cmd = (f"{mnnconvert} -f ONNX --modelFile llm.onnx --MNNModel {dstmodel} "
+           f"--allowCustomOp --transformerFuse --saveExternalData "
+           f"--transformerFuseC4=1 --transformerFuseQkvProj=1 "
+           f"--transformerFuseGateUpProj=1 --transformerFuseLnProj=1 "
            f"--weightQuantBits=8 --weightQuantAsymmetric=0 "
            f"--compressionParamsFile {dstjson} --testdir {testdir} "
            f"--thredhold 0.001 --testconfig {fwdjson} --alignDenormalizedValue 0 ")
